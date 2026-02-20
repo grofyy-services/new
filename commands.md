@@ -1,0 +1,1 @@
+ psql -h new.cd02yeymmv4n.us-east-2.rds.amazonaws.com -p 5432 -U postgres -d postgres

@@ -1,0 +1,85 @@
+name: CD - Build, Push to DockerHub, Deploy to EC2
+
+on:
+  push:
+    branches: ["main"]
+
+concurrency:
+  group: cd-main
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Build
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & push Backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/new-backend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/new-backend:${{ github.sha }}
+
+      - name: Build & push Frontend
+        uses: docker/build-push-action@v6
+        env:
+          VITE_API_BASE_URL: http://3.150.123.81:8080
+        with:
+          context: ./frontend
+          push: true
+          build-args: VITE_API_BASE_URL=${{ env.VITE_API_BASE_URL }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/new-frontend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/new-frontend:${{ github.sha }}
+
+  deploy:
+    name: Deploy to EC2 (compose pull + up)
+    runs-on: ubuntu-latest
+    needs: [build-push]
+    steps:
+      - name: Checkout (to copy compose file)
+        uses: actions/checkout@v4
+
+      - name: Upload docker-compose.prod.yml to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          source: "docker-compose.prod.yml"
+          target: "/opt/product-app"
+
+      - name: SSH deploy (pull + up)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -e
+            sudo mkdir -p /opt/product-app
+            sudo chown -R $USER:$USER /opt/product-app
+            cd /opt/product-app
+
+            docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" -p "${{ secrets.DOCKERHUB_TOKEN }}"
+
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+            docker image prune -f
